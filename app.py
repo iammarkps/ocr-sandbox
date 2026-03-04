@@ -239,23 +239,24 @@ class TyphoonOCR:
             AutoModelForImageTextToText,
             AutoTokenizer,
             Qwen3VLProcessor,
-            Qwen3VLVideoProcessor,
         )
 
         self.model = AutoModelForImageTextToText.from_pretrained(
-            MODEL_DIR, dtype="auto", device_map="auto"
+            MODEL_DIR,
+            dtype="auto",
+            device_map="auto",
+            local_files_only=True,
         )
         self.model.eval()
 
         # Build processor manually — AutoProcessor.from_pretrained() crashes
         # because AutoVideoProcessor mapping is None in this transformers version.
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
-        image_processor = AutoImageProcessor.from_pretrained(MODEL_DIR)
-        video_processor = Qwen3VLVideoProcessor.from_pretrained(MODEL_DIR)
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, local_files_only=True)
+        image_processor = AutoImageProcessor.from_pretrained(MODEL_DIR, local_files_only=True)
         self.processor = Qwen3VLProcessor(
             image_processor=image_processor,
             tokenizer=tokenizer,
-            video_processor=video_processor,
+            video_processor=None,
             chat_template=tokenizer.chat_template,
         )
         print("Model loaded.")
