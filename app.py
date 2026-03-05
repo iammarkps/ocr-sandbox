@@ -336,12 +336,13 @@ class TyphoonOCR:
         """OCR a batch of pages in one remote call to reduce RPC overhead."""
         from PIL import Image
 
-        results: list[str] = []
+        images = []
         for image_bytes in page_batch:
             with Image.open(io.BytesIO(image_bytes)) as img:
                 img.load()
-                results.append(self._ocr_pil_image(self._normalize_image(img)))
-        return results
+                images.append(self._normalize_image(img))
+
+        return [self._ocr_pil_image(img) for img in images]
 
     @modal.method()
     def run_pdf_range(self, staged_pdf_path: str, start_page: int, end_page: int, dpi: int = PDF_DPI) -> list[str]:
@@ -508,11 +509,11 @@ def main(file_path: str = "input.pdf", output: str = "", overwrite: bool = False
                 processed_ranges = 0
                 previous_range_time = time.perf_counter()
                 range_args = ((staged_pdf_path, start_page, end_page, PDF_DPI) for start_page, end_page in ranges)
-                range_results_iter = ocr.run_pdf_range.starmap(range_args, order_outputs=True)
+                range_results = list(ocr.run_pdf_range.starmap(range_args, order_outputs=True))
 
                 with temp_path.open("w", encoding="utf-8") as tmp_file:
-                    for range_idx, ((start_page, end_page), range_results) in enumerate(
-                        zip(ranges, range_results_iter), start=1
+                    for range_idx, ((start_page, end_page), range_result) in enumerate(
+                        zip(ranges, range_results), start=1
                     ):
                         now = time.perf_counter()
                         range_elapsed = now - previous_range_time
@@ -523,7 +524,7 @@ def main(file_path: str = "input.pdf", output: str = "", overwrite: bool = False
                         )
                         processed_ranges = range_idx
 
-                        for _, page_block in _iter_page_blocks_for_range(start_page, end_page, range_results):
+                        for _, page_block in _iter_page_blocks_for_range(start_page, end_page, range_result):
                             if wrote_page:
                                 tmp_file.write("\n\n---\n\n")
                                 print("\n---\n")
