@@ -15,12 +15,12 @@ class ParseEnvTests(unittest.TestCase):
 
     def test_parse_int_env_rejects_non_integer(self):
         with mock.patch.dict(os.environ, {"TEST_INT": "abc"}, clear=True):
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(app.ConfigurationError):
                 app._parse_int_env("TEST_INT", 7)
 
     def test_parse_int_env_rejects_out_of_range(self):
         with mock.patch.dict(os.environ, {"TEST_INT": "9"}, clear=True):
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(app.ConfigurationError):
                 app._parse_int_env("TEST_INT", 7, max_value=5)
 
     def test_parse_choice_env_uses_default_when_unset(self):
@@ -32,8 +32,48 @@ class ParseEnvTests(unittest.TestCase):
 
     def test_parse_choice_env_rejects_invalid_value(self):
         with mock.patch.dict(os.environ, {"TEST_PIPELINE": "invalid"}, clear=True):
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(app.ConfigurationError):
                 app._parse_choice_env("TEST_PIPELINE", "range_map", {"range_map", "legacy"})
+
+
+class ConfigTests(unittest.TestCase):
+    def test_from_env_uses_defaults_when_unset(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            config = app.Config.from_env()
+        self.assertEqual(config.gpu, "A10")
+        self.assertEqual(config.max_containers, app.MAX_ALLOWED_CONTAINERS)
+        self.assertEqual(config.pdf_pipeline, "range_map")
+        self.assertEqual(config.staged_input_ttl_seconds, 86_400)
+
+    def test_from_env_rejects_min_containers_above_max(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "TYPHOON_OCR_MAX_CONTAINERS": "1",
+                "TYPHOON_OCR_MIN_CONTAINERS": "2",
+            },
+            clear=True,
+        ):
+            with self.assertRaises(app.ConfigurationError):
+                app.Config.from_env()
+
+    def test_from_env_accepts_staged_input_ttl_override(self):
+        with mock.patch.dict(
+            os.environ,
+            {"TYPHOON_OCR_STAGED_INPUT_TTL_SECONDS": "7200"},
+            clear=True,
+        ):
+            config = app.Config.from_env()
+        self.assertEqual(config.staged_input_ttl_seconds, 7200)
+
+    def test_from_env_rejects_staged_input_ttl_below_minimum(self):
+        with mock.patch.dict(
+            os.environ,
+            {"TYPHOON_OCR_STAGED_INPUT_TTL_SECONDS": "3599"},
+            clear=True,
+        ):
+            with self.assertRaises(app.ConfigurationError):
+                app.Config.from_env()
 
 
 class LocalInputValidationTests(unittest.TestCase):
@@ -41,7 +81,7 @@ class LocalInputValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "sample.txt"
             path.write_text("hello", encoding="utf-8")
-            with self.assertRaises(ValueError):
+            with self.assertRaises(app.ValidationError):
                 app._validate_local_input(path)
 
     def test_rejects_oversized_file(self):
@@ -49,7 +89,7 @@ class LocalInputValidationTests(unittest.TestCase):
             path = Path(tmpdir) / "big.pdf"
             path.write_bytes(b"x" * (2 * 1024 * 1024))
             with mock.patch.object(app, "MAX_FILE_MB", 1):
-                with self.assertRaises(ValueError):
+                with self.assertRaises(app.ValidationError):
                     app._validate_local_input(path)
 
     def test_accepts_supported_file(self):
@@ -66,7 +106,7 @@ class OutputPathValidationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             out_path = Path(tmpdir) / "output.md"
             out_path.write_text("existing", encoding="utf-8")
-            with self.assertRaises(ValueError):
+            with self.assertRaises(app.ValidationError):
                 app._validate_output_path(out_path, overwrite=False)
 
     def test_allows_existing_output_with_overwrite(self):
@@ -86,7 +126,7 @@ class RangeHelperTests(unittest.TestCase):
         self.assertEqual(app._chunk_items(items, 2), [[b"1", b"2"], [b"3", b"4"], [b"5"]])
 
     def test_chunk_items_rejects_non_positive_size(self):
-        with self.assertRaises(ValueError):
+        with self.assertRaises(app.ValidationError):
             app._chunk_items([b"1"], 0)
 
     def test_page_ranges_even_split(self):
@@ -96,7 +136,7 @@ class RangeHelperTests(unittest.TestCase):
         self.assertEqual(app._page_ranges(5, 2), [(0, 2), (2, 4), (4, 5)])
 
     def test_page_ranges_rejects_non_positive_size(self):
-        with self.assertRaises(ValueError):
+        with self.assertRaises(app.ValidationError):
             app._page_ranges(5, 0)
 
     def test_iter_page_blocks_range_continuity(self):
@@ -107,8 +147,32 @@ class RangeHelperTests(unittest.TestCase):
         self.assertEqual(blocks[-1][1], "<!-- Page 8 -->\nD")
 
     def test_iter_page_blocks_rejects_length_mismatch(self):
-        with self.assertRaises(RuntimeError):
+        with self.assertRaises(app.PDFProcessingError):
             list(app._iter_page_blocks_for_range(0, 2, ["only-one"]))
+
+
+class StagedInputCleanupTests(unittest.TestCase):
+    def test_cleanup_stale_input_runs_deletes_only_old_directories(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            inputs_root = Path(tmpdir)
+            stale_dir = inputs_root / "stale-run"
+            fresh_dir = inputs_root / "fresh-run"
+            marker_file = inputs_root / "note.txt"
+
+            stale_dir.mkdir()
+            fresh_dir.mkdir()
+            marker_file.write_text("keep", encoding="utf-8")
+
+            now = 10_000.0
+            os.utime(stale_dir, (now - 4_000, now - 4_000))
+            os.utime(fresh_dir, (now - 100, now - 100))
+
+            deleted = app._cleanup_stale_input_runs(inputs_root, now, ttl_seconds=3_600)
+
+            self.assertEqual(deleted, 1)
+            self.assertFalse(stale_dir.exists())
+            self.assertTrue(fresh_dir.exists())
+            self.assertTrue(marker_file.exists())
 
 
 class MainPipelineTests(unittest.TestCase):
@@ -147,6 +211,7 @@ class MainPipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             input_path = Path(tmpdir) / "input.pdf"
             output_path = Path(tmpdir) / "output.md"
+            temp_path = output_path.with_suffix(output_path.suffix + ".tmp")
             input_path.write_bytes(b"pdf")
 
             fake_ocr = self._make_fake_ocr()
@@ -189,11 +254,63 @@ class MainPipelineTests(unittest.TestCase):
                 "<!-- Page 4 -->\nD\n\n---\n\n<!-- Page 5 -->\nE\n"
             )
             self.assertEqual(output_path.read_text(encoding="utf-8"), expected)
+            self.assertFalse(temp_path.exists())
 
-    def test_main_range_map_calls_cleanup_when_starmap_raises_mid_iteration(self):
+    def test_main_range_map_streams_temp_output_before_iterator_finishes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             input_path = Path(tmpdir) / "input.pdf"
             output_path = Path(tmpdir) / "output.md"
+            temp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+            input_path.write_bytes(b"pdf")
+
+            fake_ocr = self._make_fake_ocr()
+            stage_remote = mock.Mock(return_value=("/inputs/run/input.pdf", 5))
+            cleanup_remote = mock.Mock()
+            captured = {}
+
+            def starmap_side_effect(input_iterator, order_outputs=True):
+                captured["args"] = list(input_iterator)
+                captured["ordered"] = order_outputs
+
+                def stream():
+                    yield ["A", "B"]
+                    captured["temp_after_first_range"] = temp_path.read_text(encoding="utf-8")
+                    yield ["C", "D"]
+                    yield ["E"]
+
+                return stream()
+
+            fake_ocr.run_pdf_range.starmap.side_effect = starmap_side_effect
+
+            with mock.patch.object(app, "PDF_PIPELINE", "range_map"), mock.patch.object(
+                app, "PAGE_BATCH_SIZE", 2
+            ), mock.patch.object(app, "TyphoonOCR", return_value=fake_ocr), mock.patch.object(
+                app, "stage_pdf_input", SimpleNamespace(remote=stage_remote)
+            ), mock.patch.object(app, "cleanup_staged_pdf", SimpleNamespace(remote=cleanup_remote)):
+                app.main(file_path=str(input_path), output=str(output_path), overwrite=True)
+
+            cleanup_remote.assert_called_once()
+            self.assertTrue(captured["ordered"])
+            self.assertEqual(
+                captured["args"],
+                [
+                    ("/inputs/run/input.pdf", 0, 2, app.PDF_DPI),
+                    ("/inputs/run/input.pdf", 2, 4, app.PDF_DPI),
+                    ("/inputs/run/input.pdf", 4, 5, app.PDF_DPI),
+                ],
+            )
+            self.assertEqual(
+                captured["temp_after_first_range"],
+                "<!-- Page 1 -->\nA\n\n---\n\n<!-- Page 2 -->\nB",
+            )
+            self.assertFalse(temp_path.exists())
+            self.assertTrue(output_path.exists())
+
+    def test_main_range_map_defers_cleanup_when_starmap_raises_mid_iteration(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = Path(tmpdir) / "input.pdf"
+            output_path = Path(tmpdir) / "output.md"
+            temp_path = output_path.with_suffix(output_path.suffix + ".tmp")
             input_path.write_bytes(b"pdf")
 
             fake_ocr = self._make_fake_ocr()
@@ -214,33 +331,31 @@ class MainPipelineTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "ocr failed"):
                     app.main(file_path=str(input_path), output=str(output_path), overwrite=True)
 
-            cleanup_remote.assert_called_once()
+            cleanup_remote.assert_not_called()
             self.assertFalse(output_path.exists())
+            self.assertFalse(temp_path.exists())
 
-    def test_main_range_map_preserves_primary_error_when_cleanup_fails(self):
+    def test_main_range_map_success_keeps_output_when_cleanup_fails(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             input_path = Path(tmpdir) / "input.pdf"
             output_path = Path(tmpdir) / "output.md"
             input_path.write_bytes(b"pdf")
 
             fake_ocr = self._make_fake_ocr()
-            stage_remote = mock.Mock(return_value=("/inputs/run/input.pdf", 2))
+            stage_remote = mock.Mock(return_value=("/inputs/run/input.pdf", 3))
             cleanup_remote = mock.Mock(side_effect=RuntimeError("cleanup failed"))
-
-            def starmap_raises(_input_iterator, order_outputs=True):
-                raise RuntimeError("ocr failed")
-
-            fake_ocr.run_pdf_range.starmap.side_effect = starmap_raises
+            fake_ocr.run_pdf_range.starmap.return_value = iter([["A", "B"], ["C"]])
 
             with mock.patch.object(app, "PDF_PIPELINE", "range_map"), mock.patch.object(
-                app, "TyphoonOCR", return_value=fake_ocr
+                app, "PAGE_BATCH_SIZE", 2
+            ), mock.patch.object(app, "TyphoonOCR", return_value=fake_ocr
             ), mock.patch.object(app, "stage_pdf_input", SimpleNamespace(remote=stage_remote)), mock.patch.object(
                 app, "cleanup_staged_pdf", SimpleNamespace(remote=cleanup_remote)
             ):
-                with self.assertRaisesRegex(RuntimeError, "ocr failed"):
-                    app.main(file_path=str(input_path), output=str(output_path), overwrite=True)
+                app.main(file_path=str(input_path), output=str(output_path), overwrite=True)
 
             cleanup_remote.assert_called_once()
+            self.assertTrue(output_path.exists())
 
 
 class ModelIntegrityTests(unittest.TestCase):

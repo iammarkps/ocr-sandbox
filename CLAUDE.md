@@ -22,6 +22,7 @@ Modal-based serverless OCR CLI using Typhoon OCR (`scb10x/typhoon-ocr1.5-2b`) fo
 - `min_containers=1`
 - `buffer_containers=1`
 - `scaledown_window=1200`
+- `staged_input_ttl_seconds=86400`
 
 ## Commands
 ```bash
@@ -47,8 +48,11 @@ Supported env vars:
 - `TYPHOON_OCR_MAX_FILE_MB`
 - `TYPHOON_OCR_MAX_PDF_PAGES`
 - `TYPHOON_OCR_PDF_DPI`
+- `TYPHOON_OCR_PAGE_BATCH_SIZE`
+- `TYPHOON_OCR_PDF_PIPELINE`
 - `TYPHOON_OCR_MAX_IMAGE_SIDE`
 - `TYPHOON_OCR_MAX_IMAGE_PIXELS`
+- `TYPHOON_OCR_STAGED_INPUT_TTL_SECONDS`
 - `TYPHOON_OCR_MODEL_REVISION`
 
 ## Model Download and Integrity
@@ -60,10 +64,14 @@ Supported env vars:
 
 ## OCR Flow
 - Image OCR: `run_page(image_bytes)`
-- PDF OCR: `pdf_to_page_images(pdf_bytes)` + `run_page.map(page_images)`
-  - renders pages in Modal
-  - enforces max page limit
-  - processes pages in parallel across up to `max_containers`
+- PDF OCR default: `stage_pdf_input(pdf_bytes, run_id)` + `run_pdf_range.starmap(...)`
+  - stages the PDF once in the Modal input volume
+  - enforces max page limit before OCR
+  - writes ordered range results incrementally to `<output>.tmp`, then atomically replaces the final file
+  - eagerly cleans up staged input on full success
+  - defers cleanup on partial stream failures and relies on TTL-based stale-run cleanup during later staging
+- Legacy PDF OCR fallback: `pdf_to_page_images(pdf_bytes)` + `run_page_batch.map(page_batches)`
+  - renders pages to PNGs in Modal before OCR
 - Class is configured with `enable_memory_snapshot=True` and `@modal.enter(snap=True)` to reduce repeated model load overhead.
 
 ## Qwen3-VL Gotchas

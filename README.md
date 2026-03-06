@@ -65,6 +65,7 @@ These defaults prioritize throughput and performance:
 - `pdf_pipeline`: `range_map` (`legacy` available as fallback)
 - `max_image_side`: `1800`
 - `max_image_pixels`: `80_000_000`
+- `staged_input_ttl_seconds`: `86400` (24 hours)
 - model revision pinned via `TYPHOON_OCR_MODEL_REVISION` (default: `be9399b`)
 
 ## Advanced Configuration (Environment Overrides)
@@ -83,6 +84,7 @@ export TYPHOON_OCR_PAGE_BATCH_SIZE=4
 export TYPHOON_OCR_PDF_PIPELINE=range_map
 export TYPHOON_OCR_MAX_IMAGE_SIDE=1800
 export TYPHOON_OCR_MAX_IMAGE_PIXELS=20000000
+export TYPHOON_OCR_STAGED_INPUT_TTL_SECONDS=86400
 export TYPHOON_OCR_MODEL_REVISION=be9399b
 ```
 
@@ -114,12 +116,16 @@ uv run modal run app.py --file-path input.pdf --output ./input.md
 
 1. Local preflight validates file type, size, and output path.
 2. `range_map` pipeline stages the PDF once in a Modal volume, then `run_pdf_range.starmap(...)` processes page ranges in parallel GPU workers without materializing all rendered PNG pages locally.
-3. Results are streamed to a temp output file in page order, then atomically swapped into place.
+3. Ordered range results are written incrementally to a temp output file as they arrive, then atomically swapped into place at the end.
 4. `legacy` pipeline remains available and uses `pdf_to_page_images.remote(...)` + `run_page_batch.map(...)`.
 
 Ordered streaming note:
 - The command keeps deterministic output ordering with `order_outputs=True`.
 - If an earlier range is slow, later completed ranges wait before being written.
+
+Staged input cleanup note:
+- Successful `range_map` runs eagerly remove the staged PDF from the Modal input volume.
+- Failed or interrupted streams defer cleanup to a later `stage_pdf_input(...)` call, which deletes stale run directories older than `TYPHOON_OCR_STAGED_INPUT_TTL_SECONDS`.
 
 GPU render tradeoff:
 - `range_map` moves PDF rendering into GPU workers.
