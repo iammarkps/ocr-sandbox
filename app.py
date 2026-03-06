@@ -2,10 +2,11 @@ import io
 import os
 import time
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterator
+from typing import TYPE_CHECKING, Any
 
 import modal
 
@@ -307,7 +308,7 @@ def _cleanup_stale_input_runs(inputs_root: Path, now: float, ttl_seconds: int) -
 
 
 @contextmanager
-def open_pdf(source: bytes | str | Path) -> Iterator[object]:
+def open_pdf(source: bytes | str | Path) -> Iterator[Any]:
     import pypdfium2 as pdfium
 
     pdf = pdfium.PdfDocument(source)
@@ -451,7 +452,7 @@ class TyphoonOCR:
 
         with torch.inference_mode():
             generated_ids = self.model.generate(**inputs, max_new_tokens=MAX_NEW_TOKENS)
-        trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids)]
+        trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids, strict=False)]
 
         return self.processor.batch_decode(
             trimmed,

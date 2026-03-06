@@ -183,6 +183,33 @@ class MainPipelineTests(unittest.TestCase):
             run_pdf_range=SimpleNamespace(starmap=mock.Mock(return_value=iter([]))),
         )
 
+    def test_main_default_pdf_entrypoint_mocked_modal_smoke(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_path = Path(tmpdir) / "input.pdf"
+            output_path = Path(tmpdir) / "output.md"
+            input_path.write_bytes(b"pdf")
+
+            fake_ocr = self._make_fake_ocr()
+            fake_ocr.run_pdf_range.starmap.return_value = iter([["A", "B"]])
+            stage_remote = mock.Mock(return_value=("/inputs/run/input.pdf", 2))
+            cleanup_remote = mock.Mock()
+
+            with mock.patch.object(app, "PDF_PIPELINE", "range_map"), mock.patch.object(
+                app, "TyphoonOCR", return_value=fake_ocr
+            ), mock.patch.object(app, "stage_pdf_input", SimpleNamespace(remote=stage_remote)), mock.patch.object(
+                app, "cleanup_staged_pdf", SimpleNamespace(remote=cleanup_remote)
+            ):
+                app.main(file_path=str(input_path), output=str(output_path), overwrite=True)
+
+            stage_remote.assert_called_once()
+            fake_ocr.run_pdf_range.starmap.assert_called_once()
+            cleanup_remote.assert_called_once()
+            self.assertTrue(output_path.exists())
+            self.assertEqual(
+                output_path.read_text(encoding="utf-8"),
+                "<!-- Page 1 -->\nA\n\n---\n\n<!-- Page 2 -->\nB\n",
+            )
+
     def test_main_uses_legacy_pipeline_when_configured(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             input_path = Path(tmpdir) / "input.pdf"
@@ -217,7 +244,7 @@ class MainPipelineTests(unittest.TestCase):
             fake_ocr = self._make_fake_ocr()
             stage_remote = mock.Mock(return_value=("/inputs/run/input.pdf", 5))
             cleanup_remote = mock.Mock()
-            captured = {}
+            captured: dict[str, object] = {}
 
             def starmap_side_effect(input_iterator, order_outputs=True):
                 captured["args"] = list(input_iterator)
@@ -266,7 +293,7 @@ class MainPipelineTests(unittest.TestCase):
             fake_ocr = self._make_fake_ocr()
             stage_remote = mock.Mock(return_value=("/inputs/run/input.pdf", 5))
             cleanup_remote = mock.Mock()
-            captured = {}
+            captured: dict[str, object] = {}
 
             def starmap_side_effect(input_iterator, order_outputs=True):
                 captured["args"] = list(input_iterator)

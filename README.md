@@ -35,6 +35,26 @@ unset HF_TOKEN
 uv run modal run app.py::download_model
 ```
 
+## Developer Quality Gates
+
+Install runtime + developer tooling from lockfile:
+
+```bash
+uv sync --locked --group dev
+```
+
+Run the local quality gates (same commands used in CI):
+
+```bash
+uv run ruff check .
+uv run mypy app.py tests
+uv run python -m unittest -v
+```
+
+CI contract:
+- GitHub Actions runs these three gates on every `pull_request` and every `push` to `main`.
+- Any lint, typing, or test failure fails CI and blocks merge until fixed.
+
 ## Usage
 
 ```bash
