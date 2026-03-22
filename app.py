@@ -1,4 +1,5 @@
 import io
+import math
 import os
 import time
 import uuid
@@ -13,12 +14,21 @@ import modal
 if TYPE_CHECKING:
     from PIL import Image as PILImage
 
-app = modal.App("typhoon-ocr")
+app = modal.App("nemotron-ocr")
 
-MODEL_ID = "scb10x/typhoon-ocr1.5-2b"
-MODEL_DIR = "/models/typhoon-ocr1.5-2b"
+MODEL_ID = "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16"
+MODEL_DIR = "/models/nemotron-nano-12b-vl"
 PDF_POINTS_PER_INCH = 72
 MAX_ALLOWED_CONTAINERS = 5
+_GPU_HOURLY_RATE: dict[str, float] = {
+    "T4": 0.59,
+    "A10": 1.10,
+    "A10G": 1.10,
+    "A100": 2.78,
+    "A100-80GB": 3.34,
+    "H100": 4.79,
+}
+_SECS_PER_RANGE = 4.0
 
 
 class OCRError(Exception):
@@ -72,7 +82,7 @@ def _parse_choice_env(name: str, default: str, allowed: set[str]) -> str:
 
 @dataclass(frozen=True)
 class Config:
-    gpu: str = "A10"
+    gpu: str = "A100"
     max_containers: int = MAX_ALLOWED_CONTAINERS
     min_containers: int = 1
     buffer_containers: int = 1
@@ -83,67 +93,67 @@ class Config:
     pdf_dpi: int = 150
     page_batch_size: int = 4
     pdf_pipeline: str = "range_map"
-    max_image_side: int = 1800
+    max_image_side: int = 2048
     max_image_pixels: int = 80_000_000
     staged_input_ttl_seconds: int = 86_400
-    model_revision: str = "be9399b"
+    model_revision: str = "main"
 
     @classmethod
     def from_env(cls) -> "Config":
         config = cls(
-            gpu=_parse_str_env("TYPHOON_OCR_GPU", cls.gpu),
+            gpu=_parse_str_env("NEMOTRON_OCR_GPU", cls.gpu),
             max_containers=_parse_int_env(
-                "TYPHOON_OCR_MAX_CONTAINERS",
+                "NEMOTRON_OCR_MAX_CONTAINERS",
                 cls.max_containers,
                 min_value=1,
                 max_value=MAX_ALLOWED_CONTAINERS,
             ),
             min_containers=_parse_int_env(
-                "TYPHOON_OCR_MIN_CONTAINERS",
+                "NEMOTRON_OCR_MIN_CONTAINERS",
                 cls.min_containers,
                 min_value=0,
                 max_value=MAX_ALLOWED_CONTAINERS,
             ),
             buffer_containers=_parse_int_env(
-                "TYPHOON_OCR_BUFFER_CONTAINERS",
+                "NEMOTRON_OCR_BUFFER_CONTAINERS",
                 cls.buffer_containers,
                 min_value=0,
                 max_value=MAX_ALLOWED_CONTAINERS,
             ),
-            scaledown_window=_parse_int_env("TYPHOON_OCR_SCALEDOWN_WINDOW", cls.scaledown_window, min_value=60),
-            max_new_tokens=_parse_int_env("TYPHOON_OCR_MAX_NEW_TOKENS", cls.max_new_tokens, min_value=1),
-            max_file_mb=_parse_int_env("TYPHOON_OCR_MAX_FILE_MB", cls.max_file_mb, min_value=1),
-            max_pdf_pages=_parse_int_env("TYPHOON_OCR_MAX_PDF_PAGES", cls.max_pdf_pages, min_value=1),
-            pdf_dpi=_parse_int_env("TYPHOON_OCR_PDF_DPI", cls.pdf_dpi, min_value=PDF_POINTS_PER_INCH),
-            page_batch_size=_parse_int_env("TYPHOON_OCR_PAGE_BATCH_SIZE", cls.page_batch_size, min_value=1, max_value=32),
+            scaledown_window=_parse_int_env("NEMOTRON_OCR_SCALEDOWN_WINDOW", cls.scaledown_window, min_value=60),
+            max_new_tokens=_parse_int_env("NEMOTRON_OCR_MAX_NEW_TOKENS", cls.max_new_tokens, min_value=1),
+            max_file_mb=_parse_int_env("NEMOTRON_OCR_MAX_FILE_MB", cls.max_file_mb, min_value=1),
+            max_pdf_pages=_parse_int_env("NEMOTRON_OCR_MAX_PDF_PAGES", cls.max_pdf_pages, min_value=1),
+            pdf_dpi=_parse_int_env("NEMOTRON_OCR_PDF_DPI", cls.pdf_dpi, min_value=PDF_POINTS_PER_INCH),
+            page_batch_size=_parse_int_env("NEMOTRON_OCR_PAGE_BATCH_SIZE", cls.page_batch_size, min_value=1, max_value=32),
             pdf_pipeline=_parse_choice_env(
-                "TYPHOON_OCR_PDF_PIPELINE",
+                "NEMOTRON_OCR_PDF_PIPELINE",
                 cls.pdf_pipeline,
                 {"legacy", "range_map"},
             ),
-            max_image_side=_parse_int_env("TYPHOON_OCR_MAX_IMAGE_SIDE", cls.max_image_side, min_value=256),
+            max_image_side=_parse_int_env("NEMOTRON_OCR_MAX_IMAGE_SIDE", cls.max_image_side, min_value=256),
             max_image_pixels=_parse_int_env(
-                "TYPHOON_OCR_MAX_IMAGE_PIXELS",
+                "NEMOTRON_OCR_MAX_IMAGE_PIXELS",
                 cls.max_image_pixels,
                 min_value=1_000_000,
             ),
             staged_input_ttl_seconds=_parse_int_env(
-                "TYPHOON_OCR_STAGED_INPUT_TTL_SECONDS",
+                "NEMOTRON_OCR_STAGED_INPUT_TTL_SECONDS",
                 cls.staged_input_ttl_seconds,
                 min_value=3_600,
             ),
-            model_revision=_parse_str_env("TYPHOON_OCR_MODEL_REVISION", cls.model_revision),
+            model_revision=_parse_str_env("NEMOTRON_OCR_MODEL_REVISION", cls.model_revision),
         )
 
         if config.min_containers > config.max_containers:
             raise ConfigurationError(
-                f"TYPHOON_OCR_MIN_CONTAINERS ({config.min_containers}) must be <= "
-                f"TYPHOON_OCR_MAX_CONTAINERS ({config.max_containers})."
+                f"NEMOTRON_OCR_MIN_CONTAINERS ({config.min_containers}) must be <= "
+                f"NEMOTRON_OCR_MAX_CONTAINERS ({config.max_containers})."
             )
         if config.buffer_containers > config.max_containers:
             raise ConfigurationError(
-                f"TYPHOON_OCR_BUFFER_CONTAINERS ({config.buffer_containers}) must be <= "
-                f"TYPHOON_OCR_MAX_CONTAINERS ({config.max_containers})."
+                f"NEMOTRON_OCR_BUFFER_CONTAINERS ({config.buffer_containers}) must be <= "
+                f"NEMOTRON_OCR_MAX_CONTAINERS ({config.max_containers})."
             )
 
         return config
@@ -185,16 +195,18 @@ Formatting Rules:
 - Checkboxes: ☐ unchecked, ☑ checked"""
 
 image = (
-    modal.Image.debian_slim(python_version="3.12")
+    # Pre-built image with Python 3.12, PyTorch, causal-conv1d, and mamba-ssm.
+    # CUDA extensions are compiled in Docker (see Dockerfile) to avoid Modal's
+    # builder output rate limits that kill the verbose ptxas compilation.
+    modal.Image.from_registry("ghcr.io/iammark/nemotron-ocr-base:latest")
     .pip_install_from_pyproject(
         "pyproject.toml",
-        # Blackwell GPUs (for example B200) need CUDA 12.8+ PyTorch wheels.
         extra_index_url="https://download.pytorch.org/whl/cu128",
     )
 )
 
-volume = modal.Volume.from_name("typhoon-ocr-models", create_if_missing=True)
-input_volume = modal.Volume.from_name("typhoon-ocr-inputs", create_if_missing=True)
+volume = modal.Volume.from_name("nemotron-ocr-models", create_if_missing=True)
+input_volume = modal.Volume.from_name("nemotron-ocr-inputs", create_if_missing=True)
 hf_secret = modal.Secret.from_name("huggingface-secret")
 
 
@@ -222,6 +234,60 @@ def _format_bytes(num_bytes: int) -> str:
             return f"{value:.2f} {unit}"
         value /= 1024.0
     return f"{num_bytes} B"
+
+
+def _gpu_hourly_rate(gpu: str) -> float:
+    return _GPU_HOURLY_RATE.get(gpu.upper(), 1.10)
+
+
+def _format_cost(cost_usd: float, gpu_secs: float, containers: int, wall_secs: float, gpu: str) -> str:
+    container_label = "container" if containers == 1 else "containers"
+    hourly_rate = _gpu_hourly_rate(gpu)
+    return (
+        f"~${cost_usd:.3f}  (~{int(gpu_secs)} GPU-sec, "
+        f"{containers} {container_label} x {wall_secs:.1f}s, {gpu} @ ${hourly_rate:.2f}/hr)"
+    )
+
+
+def _estimate_modal_cost(pages: int, gpu: str, max_containers: int, batch_size: int) -> tuple[float, float, float]:
+    if pages <= 0:
+        return 0.0, 0.0, 0.0
+    if max_containers <= 0:
+        raise ValidationError("max_containers must be > 0")
+    if batch_size <= 0:
+        raise ValidationError("batch_size must be > 0")
+
+    ranges = math.ceil(pages / batch_size)
+    containers = min(ranges, max_containers)
+    est_wall_secs = math.ceil(ranges / containers) * _SECS_PER_RANGE
+    est_gpu_secs = containers * est_wall_secs
+    est_cost_usd = est_gpu_secs * _gpu_hourly_rate(gpu) / 3600.0
+    return est_wall_secs, est_gpu_secs, est_cost_usd
+
+
+def _print_cost_estimate(pages: int | None, gpu: str, max_containers: int, batch_size: int) -> None:
+    if pages is None:
+        print("- Estimated pages: unknown")
+        print("- Estimated cost: unavailable")
+        return
+
+    est_wall_secs, est_gpu_secs, est_cost_usd = _estimate_modal_cost(pages, gpu, max_containers, batch_size)
+    ranges = math.ceil(pages / batch_size)
+    containers = min(ranges, max_containers)
+
+    print(f"- Estimated pages: {pages}")
+    print(f"- Estimated cost: {_format_cost(est_cost_usd, est_gpu_secs, containers, est_wall_secs, gpu)}")
+
+
+def _print_cost_summary(page_count: int, actual_wall_secs: float, gpu: str, containers_used: int) -> None:
+    if page_count <= 0:
+        return
+
+    containers = max(1, containers_used)
+    gpu_secs = containers * actual_wall_secs
+    cost_usd = gpu_secs * _gpu_hourly_rate(gpu) / 3600.0
+
+    print(f"Estimated actual cost: {_format_cost(cost_usd, gpu_secs, containers, actual_wall_secs, gpu)}")
 
 
 def _validate_local_input(path: Path) -> tuple[str, int]:
@@ -361,7 +427,7 @@ def download_model():
     scaledown_window=SCALEDOWN_WINDOW,
     enable_memory_snapshot=True,
 )
-class TyphoonOCR:
+class NemotronOCR:
     @modal.enter(snap=True)
     def load_model(self):
         valid, reason = _model_dir_integrity_status(MODEL_DIR)
@@ -372,30 +438,18 @@ class TyphoonOCR:
 
         print(f"Loading model {MODEL_ID} @ {MODEL_REVISION}")
 
-        from transformers import (
-            AutoImageProcessor,
-            AutoModelForImageTextToText,
-            AutoTokenizer,
-            Qwen3VLProcessor,
-            Qwen3VLVideoProcessor,
-        )
+        import torch
+        from transformers import AutoModelForCausalLM, AutoProcessor, AutoTokenizer
 
-        self.model = AutoModelForImageTextToText.from_pretrained(
-            MODEL_DIR, dtype="auto", device_map="auto"
-        )
-        self.model.eval()
+        self.model = AutoModelForCausalLM.from_pretrained(
+            MODEL_DIR,
+            trust_remote_code=True,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+        ).eval()
 
-        # Build processor manually — AutoProcessor.from_pretrained() crashes
-        # because AutoVideoProcessor mapping is None in this transformers version.
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR)
-        image_processor = AutoImageProcessor.from_pretrained(MODEL_DIR)
-        video_processor = Qwen3VLVideoProcessor.from_pretrained(MODEL_DIR)
-        self.processor = Qwen3VLProcessor(
-            image_processor=image_processor,
-            tokenizer=tokenizer,
-            video_processor=video_processor,
-            chat_template=tokenizer.chat_template,
-        )
+        self.tokenizer = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
+        self.processor = AutoProcessor.from_pretrained(MODEL_DIR, trust_remote_code=True)
         print("Model loaded.")
 
     def _normalize_image(self, img: "PILImage.Image") -> "PILImage.Image":
@@ -426,32 +480,36 @@ class TyphoonOCR:
 
     def _ocr_pil_image(self, img: "PILImage.Image") -> str:
         import torch
-        from qwen_vl_utils import process_vision_info
 
         messages = [
+            {"role": "system", "content": "/no_think"},
             {
                 "role": "user",
                 "content": [
-                    {"type": "image", "image": img},
+                    {"type": "image", "image": ""},
                     {"type": "text", "text": PROMPT},
                 ],
-            }
+            },
         ]
 
-        text = self.processor.apply_chat_template(
+        prompt = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        image_inputs, _ = process_vision_info(messages)
-
         inputs = self.processor(
-            text=[text],
-            images=image_inputs,
-            padding=True,
+            text=[prompt],
+            images=[img],
             return_tensors="pt",
         ).to(self.model.device)
 
         with torch.inference_mode():
-            generated_ids = self.model.generate(**inputs, max_new_tokens=MAX_NEW_TOKENS)
+            generated_ids = self.model.generate(
+                pixel_values=inputs.pixel_values,
+                input_ids=inputs.input_ids,
+                attention_mask=inputs.attention_mask,
+                max_new_tokens=MAX_NEW_TOKENS,
+                do_sample=False,
+                eos_token_id=self.tokenizer.eos_token_id,
+            )
         trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated_ids, strict=False)]
 
         return self.processor.batch_decode(
@@ -571,6 +629,20 @@ def pdf_to_page_images(pdf_bytes: bytes, dpi: int = PDF_DPI) -> list[bytes]:
 
 
 def _print_preflight(path: Path, suffix: str, file_size: int) -> None:
+    estimated_pages: int | None
+    estimate_max_containers = MAX_CONTAINERS
+    estimate_batch_size = PAGE_BATCH_SIZE
+    if suffix == ".pdf":
+        try:
+            with open_pdf(str(path)) as pdf:
+                estimated_pages = len(pdf)
+        except Exception:
+            estimated_pages = None
+    else:
+        estimated_pages = 1
+        estimate_max_containers = 1
+        estimate_batch_size = 1
+
     print("Preflight")
     print(f"- Input: {path}")
     print(f"- Type: {suffix}")
@@ -586,14 +658,16 @@ def _print_preflight(path: Path, suffix: str, file_size: int) -> None:
     print(f"- PDF page batch size: {PAGE_BATCH_SIZE}")
     print(f"- PDF pipeline: {PDF_PIPELINE}")
     print(f"- Staged input TTL (s): {STAGED_INPUT_TTL_SECONDS}")
+    _print_cost_estimate(estimated_pages, GPU, estimate_max_containers, estimate_batch_size)
 
 
-def _run_image(path: Path, file_bytes: bytes, ocr: TyphoonOCR) -> str:
+def _run_image(path: Path, file_bytes: bytes, ocr: NemotronOCR) -> str:
     print(f"Running OCR on image: {path}")
     return ocr.run_page.remote(file_bytes)
 
 
-def _run_pdf_legacy(file_bytes: bytes, ocr: TyphoonOCR) -> str:
+def _run_pdf_legacy(file_bytes: bytes, ocr: NemotronOCR) -> str:
+    started_at = time.perf_counter()
     print("Rendering PDF pages in Modal (legacy pipeline)...")
     page_images = pdf_to_page_images.remote(file_bytes, PDF_DPI)
     page_batches = _chunk_items(page_images, PAGE_BATCH_SIZE)
@@ -603,10 +677,13 @@ def _run_pdf_legacy(file_bytes: bytes, ocr: TyphoonOCR) -> str:
     )
     batched_results = list(ocr.run_page_batch.map(page_batches, order_outputs=True))
     results = [text for batch in batched_results for text in batch]
+    elapsed = time.perf_counter() - started_at
+    print(f"Processed {len(page_images)} page(s) in {elapsed:.2f}s.")
+    _print_cost_summary(len(page_images), elapsed, GPU, min(len(page_batches), MAX_CONTAINERS))
     return "\n\n---\n\n".join(f"<!-- Page {i + 1} -->\n{text}" for i, text in enumerate(results))
 
 
-def _run_pdf_range_map(file_bytes: bytes, out_path: Path, ocr: TyphoonOCR) -> None:
+def _run_pdf_range_map(file_bytes: bytes, out_path: Path, ocr: NemotronOCR) -> None:
     run_id = uuid.uuid4().hex
     temp_path = out_path.with_suffix(out_path.suffix + ".tmp")
     started_at = time.perf_counter()
@@ -666,6 +743,7 @@ def _run_pdf_range_map(file_bytes: bytes, out_path: Path, ocr: TyphoonOCR) -> No
         total_elapsed = time.perf_counter() - started_at
         print(f"\nSaved to {out_path}")
         print(f"Processed {page_count} page(s) in {total_elapsed:.2f}s.")
+        _print_cost_summary(page_count, total_elapsed, GPU, min(len(ranges), MAX_CONTAINERS))
     except Exception:
         if temp_path.exists():
             temp_path.unlink()
@@ -682,7 +760,7 @@ def _run_pdf_range_map(file_bytes: bytes, out_path: Path, ocr: TyphoonOCR) -> No
             )
 
 
-def _run_pdf(file_bytes: bytes, out_path: Path, ocr: TyphoonOCR) -> str | None:
+def _run_pdf(file_bytes: bytes, out_path: Path, ocr: NemotronOCR) -> str | None:
     if PDF_PIPELINE == "legacy":
         return _run_pdf_legacy(file_bytes, ocr)
     _run_pdf_range_map(file_bytes, out_path, ocr)
@@ -704,14 +782,18 @@ def main(file_path: str = "input.pdf", output: str = "", overwrite: bool = False
     _print_preflight(path, suffix, file_size)
 
     file_bytes = path.read_bytes()
-    ocr = TyphoonOCR()
+    ocr = NemotronOCR()
 
     if suffix == ".pdf":
         output_text = _run_pdf(file_bytes, out_path, ocr)
         if output_text is None:
             return
     else:
+        started_at = time.perf_counter()
         output_text = _run_image(path, file_bytes, ocr)
+        elapsed = time.perf_counter() - started_at
+        print(f"Processed 1 page(s) in {elapsed:.2f}s.")
+        _print_cost_summary(1, elapsed, GPU, 1)
 
     normalized_output = output_text.rstrip() + "\n"
 

@@ -1,23 +1,23 @@
 # CLAUDE.md
 
 ## Project Overview
-Modal-based serverless OCR CLI using Typhoon OCR (`scb10x/typhoon-ocr1.5-2b`) for images and PDFs.
+Modal-based serverless OCR CLI using NVIDIA Nemotron (`nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16`) for images and PDFs.
 
 ## Stack
 - Runtime: Modal (serverless GPU)
-- Model: `scb10x/typhoon-ocr1.5-2b`
+- Model: `nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16`
 - Python: 3.12
 - Package manager: `uv`
 - Locked deps: see `uv.lock`
 
 ## Default Runtime Profile (Performance)
-- `gpu="A10"`
+- `gpu="A100"`
 - `max_containers=5`
 - `max_new_tokens=10000`
 - `max_file_mb=200`
 - `max_pdf_pages=200`
 - `pdf_dpi=150`
-- `max_image_side=1800`
+- `max_image_side=2048`
 - `max_image_pixels=80_000_000`
 - `min_containers=1`
 - `buffer_containers=1`
@@ -39,24 +39,24 @@ uv run modal run app.py --file-path <path> --overwrite true
 
 ## Environment Overrides
 Supported env vars:
-- `TYPHOON_OCR_GPU`
-- `TYPHOON_OCR_MIN_CONTAINERS`
-- `TYPHOON_OCR_BUFFER_CONTAINERS`
-- `TYPHOON_OCR_MAX_CONTAINERS` (hard-capped at 5)
-- `TYPHOON_OCR_SCALEDOWN_WINDOW`
-- `TYPHOON_OCR_MAX_NEW_TOKENS`
-- `TYPHOON_OCR_MAX_FILE_MB`
-- `TYPHOON_OCR_MAX_PDF_PAGES`
-- `TYPHOON_OCR_PDF_DPI`
-- `TYPHOON_OCR_PAGE_BATCH_SIZE`
-- `TYPHOON_OCR_PDF_PIPELINE`
-- `TYPHOON_OCR_MAX_IMAGE_SIDE`
-- `TYPHOON_OCR_MAX_IMAGE_PIXELS`
-- `TYPHOON_OCR_STAGED_INPUT_TTL_SECONDS`
-- `TYPHOON_OCR_MODEL_REVISION`
+- `NEMOTRON_OCR_GPU`
+- `NEMOTRON_OCR_MIN_CONTAINERS`
+- `NEMOTRON_OCR_BUFFER_CONTAINERS`
+- `NEMOTRON_OCR_MAX_CONTAINERS` (hard-capped at 5)
+- `NEMOTRON_OCR_SCALEDOWN_WINDOW`
+- `NEMOTRON_OCR_MAX_NEW_TOKENS`
+- `NEMOTRON_OCR_MAX_FILE_MB`
+- `NEMOTRON_OCR_MAX_PDF_PAGES`
+- `NEMOTRON_OCR_PDF_DPI`
+- `NEMOTRON_OCR_PAGE_BATCH_SIZE`
+- `NEMOTRON_OCR_PDF_PIPELINE`
+- `NEMOTRON_OCR_MAX_IMAGE_SIDE`
+- `NEMOTRON_OCR_MAX_IMAGE_PIXELS`
+- `NEMOTRON_OCR_STAGED_INPUT_TTL_SECONDS`
+- `NEMOTRON_OCR_MODEL_REVISION`
 
 ## Model Download and Integrity
-- Model snapshot is pinned by revision (`MODEL_REVISION`, default `be9399b`)
+- Model revision is controlled by `MODEL_REVISION` (default `main`; pin to a commit hash for reproducibility)
 - `download_model` validates integrity before skipping:
   - required: `config.json`, `tokenizer.json`, `tokenizer_config.json`
   - required: at least one `*.safetensors` or `*.bin` weight shard
@@ -74,10 +74,21 @@ Supported env vars:
   - renders pages to PNGs in Modal before OCR
 - Class is configured with `enable_memory_snapshot=True` and `@modal.enter(snap=True)` to reduce repeated model load overhead.
 
-## Qwen3-VL Gotchas
-- `AutoProcessor.from_pretrained()` is broken for this setup in `transformers>=4.57`; construct `Qwen3VLProcessor` manually.
-- Use `process_vision_info` from `qwen_vl_utils`.
-- Do not pass `videos=None` to processor.
+## Nemotron Inference Gotchas
+- `AutoProcessor.from_pretrained()` and `AutoModelForCausalLM.from_pretrained()` both require `trust_remote_code=True`.
+- Always include a system message `{"role": "system", "content": "/no_think"}` to suppress chain-of-thought output.
+- Use `tokenizer.apply_chat_template()` for text formatting (not `processor.apply_chat_template()`).
+- In `model.generate()`, pass `pixel_values`, `input_ids`, and `attention_mask` as explicit kwargs — do NOT splat `**inputs`. The Hybrid Mamba+Attention architecture rejects unexpected BatchEncoding keys.
+- Model dtype must be `torch.bfloat16` (it is the BF16 variant).
+- Requires extra deps: `mamba-ssm==2.2.5`, `causal-conv1d`, `timm`, `open-clip-torch`.
+- Max 4 images per inference call; processor handles image tiling internally (up to 12 tiles of 512×512).
+
+## Base Docker Image
+- Image: `ghcr.io/iammark/nemotron-ocr-base:latest`
+- Contains: Python 3.12, PyTorch 2.7.1 (cu128), causal-conv1d, mamba-ssm==2.2.5
+- Built by `.github/workflows/docker.yml` when `Dockerfile` changes on main
+- Manual rebuild: `gh workflow run docker.yml` or `docker build -t ghcr.io/iammark/nemotron-ocr-base:latest .`
+- **Important**: torch version in `Dockerfile` must match the pin in `pyproject.toml`
 
 ## Debugging
 - Start with full traceback.

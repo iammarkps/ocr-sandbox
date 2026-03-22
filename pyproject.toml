@@ -1,7 +1,7 @@
 [project]
-name = "typhoon-ocr"
+name = "nemotron-ocr"
 version = "0.1.0"
-description = "Modal-based Typhoon OCR CLI for images and PDFs"
+description = "Modal-based Nemotron OCR CLI for images and PDFs"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -13,7 +13,8 @@ dependencies = [
   "Pillow==12.0.0",
   "pypdfium2==4.30.0",
   "huggingface_hub==0.36.0",
-  "qwen-vl-utils==0.0.14",
+  "timm",
+  "open-clip-torch",
 ]
 
 [dependency-groups]
@@ -44,5 +45,5 @@ warn_unused_ignores = true
 no_implicit_optional = true
 
 [[tool.mypy.overrides]]
-module = ["modal", "modal.*", "pypdfium2", "pypdfium2.*", "transformers", "transformers.*", "qwen_vl_utils", "qwen_vl_utils.*"]
+module = ["modal", "modal.*", "pypdfium2", "pypdfium2.*", "transformers", "transformers.*", "mamba_ssm", "mamba_ssm.*"]
 ignore_missing_imports = true

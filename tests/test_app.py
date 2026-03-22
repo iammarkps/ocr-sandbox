@@ -40,7 +40,7 @@ class ConfigTests(unittest.TestCase):
     def test_from_env_uses_defaults_when_unset(self):
         with mock.patch.dict(os.environ, {}, clear=True):
             config = app.Config.from_env()
-        self.assertEqual(config.gpu, "A10")
+        self.assertEqual(config.gpu, "A100")
         self.assertEqual(config.max_containers, app.MAX_ALLOWED_CONTAINERS)
         self.assertEqual(config.pdf_pipeline, "range_map")
         self.assertEqual(config.staged_input_ttl_seconds, 86_400)
@@ -49,8 +49,8 @@ class ConfigTests(unittest.TestCase):
         with mock.patch.dict(
             os.environ,
             {
-                "TYPHOON_OCR_MAX_CONTAINERS": "1",
-                "TYPHOON_OCR_MIN_CONTAINERS": "2",
+                "NEMOTRON_OCR_MAX_CONTAINERS": "1",
+                "NEMOTRON_OCR_MIN_CONTAINERS": "2",
             },
             clear=True,
         ):
@@ -60,7 +60,7 @@ class ConfigTests(unittest.TestCase):
     def test_from_env_accepts_staged_input_ttl_override(self):
         with mock.patch.dict(
             os.environ,
-            {"TYPHOON_OCR_STAGED_INPUT_TTL_SECONDS": "7200"},
+            {"NEMOTRON_OCR_STAGED_INPUT_TTL_SECONDS": "7200"},
             clear=True,
         ):
             config = app.Config.from_env()
@@ -69,7 +69,7 @@ class ConfigTests(unittest.TestCase):
     def test_from_env_rejects_staged_input_ttl_below_minimum(self):
         with mock.patch.dict(
             os.environ,
-            {"TYPHOON_OCR_STAGED_INPUT_TTL_SECONDS": "3599"},
+            {"NEMOTRON_OCR_STAGED_INPUT_TTL_SECONDS": "3599"},
             clear=True,
         ):
             with self.assertRaises(app.ConfigurationError):
@@ -195,7 +195,7 @@ class MainPipelineTests(unittest.TestCase):
             cleanup_remote = mock.Mock()
 
             with mock.patch.object(app, "PDF_PIPELINE", "range_map"), mock.patch.object(
-                app, "TyphoonOCR", return_value=fake_ocr
+                app, "NemotronOCR", return_value=fake_ocr
             ), mock.patch.object(app, "stage_pdf_input", SimpleNamespace(remote=stage_remote)), mock.patch.object(
                 app, "cleanup_staged_pdf", SimpleNamespace(remote=cleanup_remote)
             ):
@@ -222,7 +222,7 @@ class MainPipelineTests(unittest.TestCase):
             stage_remote = mock.Mock()
 
             with mock.patch.object(app, "PDF_PIPELINE", "legacy"), mock.patch.object(
-                app, "TyphoonOCR", return_value=fake_ocr
+                app, "NemotronOCR", return_value=fake_ocr
             ), mock.patch.object(app, "pdf_to_page_images", SimpleNamespace(remote=legacy_remote)), mock.patch.object(
                 app, "stage_pdf_input", SimpleNamespace(remote=stage_remote)
             ):
@@ -255,7 +255,7 @@ class MainPipelineTests(unittest.TestCase):
 
             with mock.patch.object(app, "PDF_PIPELINE", "range_map"), mock.patch.object(
                 app, "PAGE_BATCH_SIZE", 2
-            ), mock.patch.object(app, "TyphoonOCR", return_value=fake_ocr), mock.patch.object(
+            ), mock.patch.object(app, "NemotronOCR", return_value=fake_ocr), mock.patch.object(
                 app, "stage_pdf_input", SimpleNamespace(remote=stage_remote)
             ), mock.patch.object(
                 app, "cleanup_staged_pdf", SimpleNamespace(remote=cleanup_remote)
@@ -311,7 +311,7 @@ class MainPipelineTests(unittest.TestCase):
 
             with mock.patch.object(app, "PDF_PIPELINE", "range_map"), mock.patch.object(
                 app, "PAGE_BATCH_SIZE", 2
-            ), mock.patch.object(app, "TyphoonOCR", return_value=fake_ocr), mock.patch.object(
+            ), mock.patch.object(app, "NemotronOCR", return_value=fake_ocr), mock.patch.object(
                 app, "stage_pdf_input", SimpleNamespace(remote=stage_remote)
             ), mock.patch.object(app, "cleanup_staged_pdf", SimpleNamespace(remote=cleanup_remote)):
                 app.main(file_path=str(input_path), output=str(output_path), overwrite=True)
@@ -352,7 +352,7 @@ class MainPipelineTests(unittest.TestCase):
 
             with mock.patch.object(app, "PDF_PIPELINE", "range_map"), mock.patch.object(
                 app, "PAGE_BATCH_SIZE", 2
-            ), mock.patch.object(app, "TyphoonOCR", return_value=fake_ocr), mock.patch.object(
+            ), mock.patch.object(app, "NemotronOCR", return_value=fake_ocr), mock.patch.object(
                 app, "stage_pdf_input", SimpleNamespace(remote=stage_remote)
             ), mock.patch.object(app, "cleanup_staged_pdf", SimpleNamespace(remote=cleanup_remote)):
                 with self.assertRaisesRegex(RuntimeError, "ocr failed"):
@@ -375,7 +375,7 @@ class MainPipelineTests(unittest.TestCase):
 
             with mock.patch.object(app, "PDF_PIPELINE", "range_map"), mock.patch.object(
                 app, "PAGE_BATCH_SIZE", 2
-            ), mock.patch.object(app, "TyphoonOCR", return_value=fake_ocr
+            ), mock.patch.object(app, "NemotronOCR", return_value=fake_ocr
             ), mock.patch.object(app, "stage_pdf_input", SimpleNamespace(remote=stage_remote)), mock.patch.object(
                 app, "cleanup_staged_pdf", SimpleNamespace(remote=cleanup_remote)
             ):
